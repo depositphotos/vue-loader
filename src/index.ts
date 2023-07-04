@@ -185,6 +185,7 @@ export default function loader(
   // styles
   let stylesCode = ``
   let hasCSSModules = false
+  let hasCriticalCss = false
   const nonWhitespaceRE = /\S+/
   if (descriptor.styles.length) {
     descriptor.styles
@@ -223,7 +224,19 @@ export default function loader(
             stylesCode += `\nimport ${styleRequest}`
           }
         }
+
         // TODO SSR critical CSS collection
+        // TODO remove WA SSR critical CSS collection
+        if (!hasCriticalCss) {
+          stylesCode += `\n const criticalCss = {}`
+          propsToAttach.push([`__criticalCss`, `criticalCss`])
+          hasCriticalCss = true
+        }
+        let styleVar = `style${i}`
+        if (!style.module) {
+          stylesCode += `\n const ${styleVar} = require(${styleRequest})`
+        }
+        stylesCode += `\n criticalCss["${id}:${i}"] = ${styleVar}`
       })
     if (asCustomElement) {
       propsToAttach.push([
