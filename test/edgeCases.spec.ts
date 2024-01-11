@@ -1,6 +1,12 @@
 import * as path from 'path'
-import webpack = require('webpack')
-import { mfs, bundle, mockBundleAndRun, normalizeNewline } from './utils'
+import webpack from 'webpack'
+import {
+  mfs,
+  bundle,
+  mockBundleAndRun,
+  normalizeNewline,
+  DEFAULT_VUE_USE,
+} from './utils'
 
 // @ts-ignore
 function assertComponent({
@@ -30,11 +36,14 @@ function assertComponent({
 test('vue rule with include', async () => {
   const result = await mockBundleAndRun({
     entry: 'basic.vue',
-    modify: (config) => {
-      config!.module!.rules[0] = {
+    modify: (config: any) => {
+      const i = config.module.rules.findIndex((r) =>
+        r.test.toString().includes('vue')
+      )
+      config.module.rules[i] = {
         test: /\.vue$/,
         include: /fixtures/,
-        loader: 'vue-loader',
+        use: [DEFAULT_VUE_USE],
       }
     },
   })
@@ -49,7 +58,7 @@ test('test-less oneOf rules', async () => {
       config!.module!.rules = [
         {
           test: /\.vue$/,
-          loader: 'vue-loader',
+          use: [DEFAULT_VUE_USE],
         },
         {
           oneOf: [
@@ -70,15 +79,13 @@ test('test-less oneOf rules', async () => {
 test('normalize multiple use + options', async () => {
   await bundle({
     entry: 'basic.vue',
-    modify: (config) => {
-      config!.module!.rules[0] = {
+    modify: (config: any) => {
+      const i = config.module.rules.findIndex((r) =>
+        r.test.toString().includes('vue')
+      )
+      config!.module!.rules[i] = {
         test: /\.vue$/,
-        use: [
-          {
-            loader: 'vue-loader',
-            options: {},
-          },
-        ],
+        use: [DEFAULT_VUE_USE],
       }
     },
   })
@@ -88,7 +95,10 @@ test('should not duplicate css modules value imports', async () => {
   const { window, exports } = await mockBundleAndRun({
     entry: './test/fixtures/duplicate-cssm.js',
     modify: (config: any) => {
-      config!.module!.rules[1] = {
+      const i = config.module.rules.findIndex((r) =>
+        r.test.toString().includes('css')
+      )
+      config.module.rules[i] = {
         test: /\.css$/,
         use: [
           'style-loader',
@@ -114,10 +124,9 @@ test('should not duplicate css modules value imports', async () => {
 
 // #1213
 test('html-webpack-plugin', async () => {
-  let HTMLPlugin = require('html-webpack-plugin')
-  if (process.env.WEBPACK5) {
-    HTMLPlugin = require('html-webpack-plugin-v5')
-  }
+  const HTMLPlugin = process.env.WEBPACK4
+    ? require('html-webpack-plugin')
+    : require('html-webpack-plugin-v5')
   await bundle({
     entry: 'basic.vue',
     plugins: [
@@ -137,8 +146,11 @@ test('html-webpack-plugin', async () => {
 test('usage with null-loader', async () => {
   await mockBundleAndRun({
     entry: 'basic.vue',
-    modify: (config) => {
-      config!.module!.rules[1] = {
+    modify: (config: any) => {
+      const i = config.module.rules.findIndex((r) =>
+        r.test.toString().includes('css')
+      )
+      config.module.rules[i] = {
         test: /\.css$/,
         use: ['null-loader'],
       }
@@ -148,10 +160,9 @@ test('usage with null-loader', async () => {
 
 // #1278
 test('proper dedupe on src-imports with options', async () => {
-  let tsLoaderPath = require.resolve('ts-loader')
-  if (process.env.WEBPACK5) {
-    tsLoaderPath = require.resolve('ts-loader-v9')
-  }
+  const tsLoaderPath = process.env.WEBPACK4
+    ? require.resolve('ts-loader')
+    : require.resolve('ts-loader-v9')
   const result = await mockBundleAndRun({
     entry: 'ts.vue',
     resolve: {
@@ -227,4 +238,31 @@ test('should work with i18n loader in production mode', async () => {
   })
 
   expect(result.componentModule.__i18n).toHaveLength(1)
+})
+
+// #2029
+test('should pass correct options to template compiler', async () => {
+  const fakeCompiler: any = {
+    compile: jest
+      .fn()
+      .mockReturnValue({ code: 'export function render() { return null; }' }),
+  }
+
+  await mockBundleAndRun({
+    entry: 'basic.vue',
+    modify: (config: any) => {
+      config.module.rules[0].use[0].options = {
+        compiler: fakeCompiler,
+      }
+      config.module.rules.push(
+        ...Array.from({ length: 10 }).map((_, i) => ({
+          test: new RegExp(`\.dummy${i}`),
+          loader: 'null-loader',
+          options: { dummyRule: i },
+        }))
+      )
+    },
+  })
+
+  expect(fakeCompiler.compile).toHaveBeenCalledTimes(1)
 })

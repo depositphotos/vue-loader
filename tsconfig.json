@@ -6,19 +6,15 @@
     "target": "es2015",
     "module": "commonjs",
     "moduleResolution": "node",
+    "esModuleInterop": true,
     "declaration": true,
     "allowJs": false,
     "noUnusedLocals": true,
     "strictNullChecks": true,
     "noImplicitAny": true,
     "removeComments": false,
-    "lib": [
-      "es6",
-      "es7",
-      "DOM"
-    ]
+    "skipLibCheck": true,
+    "lib": ["es6", "es7", "DOM"]
   },
-  "include": [
-    "src"
-  ]
+  "include": ["src"]
 }

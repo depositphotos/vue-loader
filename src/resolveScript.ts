@@ -1,4 +1,4 @@
-import webpack = require('webpack')
+import type { LoaderContext } from 'webpack'
 import type {
   SFCDescriptor,
   SFCScriptBlock,
@@ -6,10 +6,13 @@ import type {
 } from 'vue/compiler-sfc'
 import type { VueLoaderOptions } from 'src'
 import { resolveTemplateTSOptions } from './util'
-import { compileScript } from 'vue/compiler-sfc'
+import { compiler } from './compiler'
 
-const clientCache = new WeakMap<SFCDescriptor, SFCScriptBlock | null>()
+const { compileScript } = compiler
+export const clientCache = new WeakMap<SFCDescriptor, SFCScriptBlock | null>()
 const serverCache = new WeakMap<SFCDescriptor, SFCScriptBlock | null>()
+
+export const typeDepToSFCMap = new Map<string, Set<string>>()
 
 /**
  * inline template mode can only be enabled if:
@@ -27,7 +30,7 @@ export function resolveScript(
   descriptor: SFCDescriptor,
   scopeId: string,
   options: VueLoaderOptions,
-  loaderContext: webpack.loader.LoaderContext
+  loaderContext: LoaderContext<VueLoaderOptions>
 ) {
   if (!descriptor.script && !descriptor.scriptSetup) {
     return null
@@ -58,7 +61,10 @@ export function resolveScript(
       id: scopeId,
       isProd,
       inlineTemplate: enableInline,
+      // @ts-ignore this has been removed in 3.4
       reactivityTransform: options.reactivityTransform,
+      propsDestructure: options.propsDestructure,
+      defineModel: options.defineModel,
       babelParserPlugins: options.babelParserPlugins,
       templateOptions: {
         ssr: isServer,
@@ -72,6 +78,26 @@ export function resolveScript(
     })
   } catch (e) {
     loaderContext.emitError(e)
+  }
+
+  if (!isProd && resolved?.deps) {
+    for (const [key, sfcs] of typeDepToSFCMap) {
+      if (sfcs.has(descriptor.filename) && !resolved.deps.includes(key)) {
+        sfcs.delete(descriptor.filename)
+        if (!sfcs.size) {
+          typeDepToSFCMap.delete(key)
+        }
+      }
+    }
+
+    for (const dep of resolved.deps) {
+      const existingSet = typeDepToSFCMap.get(dep)
+      if (!existingSet) {
+        typeDepToSFCMap.set(dep, new Set([descriptor.filename]))
+      } else {
+        existingSet.add(descriptor.filename)
+      }
+    }
   }
 
   cacheToUse.set(descriptor, resolved)

@@ -1,6 +1,10 @@
 import * as qs from 'querystring'
 import type { VueLoaderOptions } from './'
-import type { RuleSetRule, Compiler, Plugin } from 'webpack'
+import type { RuleSetRule, Compiler, RuleSetUse } from 'webpack'
+import { needHMR } from './util'
+import { clientCache, typeDepToSFCMap } from './resolveScript'
+import { compiler as vueCompiler } from './compiler'
+import { descriptorCache } from './descriptorCache'
 
 const id = 'vue-loader-plugin'
 const NS = 'vue-loader'
@@ -85,16 +89,18 @@ const ruleSetCompiler = new RuleSetCompiler([
   new BasicMatcherRulePlugin('realResource'),
   new BasicMatcherRulePlugin('issuer'),
   new BasicMatcherRulePlugin('compiler'),
+  new BasicMatcherRulePlugin('issuerLayer'),
   ...objectMatcherRulePlugins,
   new BasicEffectRulePlugin('type'),
   new BasicEffectRulePlugin('sideEffects'),
   new BasicEffectRulePlugin('parser'),
   new BasicEffectRulePlugin('resolve'),
   new BasicEffectRulePlugin('generator'),
+  new BasicEffectRulePlugin('layer'),
   new UseEffectRulePlugin(),
 ])
 
-class VueLoaderPlugin implements Plugin {
+class VueLoaderPlugin {
   static NS = NS
 
   apply(compiler: Compiler) {
@@ -110,7 +116,7 @@ class VueLoaderPlugin implements Plugin {
         })
     })
 
-    const rules = compiler.options.module!.rules
+    const rules = compiler.options.module!.rules as RuleSetRule[]
     let rawVueRule: RawRule
     let vueRules: Effect[] = []
 
@@ -140,7 +146,7 @@ class VueLoaderPlugin implements Plugin {
       )
     }
 
-    // get the normlized "use" for vue files
+    // get the normalized "use" for vue files
     const vueUse = vueRules
       .filter((rule) => rule.type === 'use')
       .map((rule) => rule.value)
@@ -164,8 +170,10 @@ class VueLoaderPlugin implements Plugin {
     const vueLoaderUse = vueUse[vueLoaderUseIndex]
     const vueLoaderOptions = (vueLoaderUse.options =
       vueLoaderUse.options || {}) as VueLoaderOptions
+    const enableInlineMatchResource =
+      vueLoaderOptions.experimentalInlineMatchResource
 
-    // for each user rule (expect the vue rule), create a cloned rule
+    // for each user rule (except the vue rule), create a cloned rule
     // that targets the corresponding language blocks in *.vue files.
     const refs = new Map()
     const clonedRules = rules
@@ -215,16 +223,90 @@ class VueLoaderPlugin implements Plugin {
         const parsed = qs.parse(query.slice(1))
         return parsed.vue != null
       },
+      options: vueLoaderOptions,
     }
 
     // replace original rules
-    compiler.options.module!.rules = [
-      pitcher,
-      ...jsRulesForRenderFn,
-      templateCompilerRule,
-      ...clonedRules,
-      ...rules,
-    ]
+    if (enableInlineMatchResource) {
+      // Match rules using `vue-loader`
+      const vueLoaderRules = rules.filter((rule) => {
+        const matchOnce = (use?: RuleSetUse) => {
+          let loaderString = ''
+
+          if (!use) {
+            return loaderString
+          }
+
+          if (typeof use === 'string') {
+            loaderString = use
+          } else if (Array.isArray(use)) {
+            loaderString = matchOnce(use[0])
+          } else if (typeof use === 'object' && use.loader) {
+            loaderString = use.loader
+          }
+          return loaderString
+        }
+
+        const loader = rule.loader || matchOnce(rule.use)
+        return (
+          loader === require('../package.json').name ||
+          loader.startsWith(require.resolve('./index'))
+        )
+      })
+
+      compiler.options.module!.rules = [
+        pitcher,
+        ...rules.filter((rule) => !vueLoaderRules.includes(rule)),
+        templateCompilerRule,
+        ...clonedRules,
+        ...vueLoaderRules,
+      ]
+    } else {
+      compiler.options.module!.rules = [
+        pitcher,
+        ...jsRulesForRenderFn,
+        templateCompilerRule,
+        ...clonedRules,
+        ...rules,
+      ]
+    }
+
+    // 3.3 HMR support for imported types
+    if (
+      needHMR(vueLoaderOptions, compiler.options) &&
+      vueCompiler.invalidateTypeCache
+    ) {
+      compiler.hooks.afterCompile.tap(id, (compilation) => {
+        if (compilation.compiler === compiler) {
+          for (const file of typeDepToSFCMap.keys()) {
+            compilation.fileDependencies.add(file)
+          }
+        }
+      })
+      compiler.hooks.watchRun.tap(id, () => {
+        if (!compiler.modifiedFiles) return
+        for (const file of compiler.modifiedFiles) {
+          vueCompiler.invalidateTypeCache(file)
+          const affectedSFCs = typeDepToSFCMap.get(file)
+          if (affectedSFCs) {
+            for (const sfc of affectedSFCs) {
+              // bust script resolve cache
+              const desc = descriptorCache.get(sfc)
+              if (desc) clientCache.delete(desc)
+              // force update importing SFC
+              // @ts-ignore
+              compiler.fileTimestamps.set(sfc, {
+                safeTime: Date.now(),
+                timestamp: Date.now(),
+              })
+            }
+          }
+        }
+        for (const file of compiler.removedFiles) {
+          vueCompiler.invalidateTypeCache(file)
+        }
+      })
+    }
   }
 }
 

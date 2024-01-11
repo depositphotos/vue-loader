@@ -1,17 +1,21 @@
 import * as fs from 'fs'
-import type { SFCDescriptor } from 'vue/compiler-sfc'
-import { parse } from 'vue/compiler-sfc'
+import type { CompilerOptions, SFCDescriptor } from 'vue/compiler-sfc'
+import { compiler } from './compiler'
 
-const cache = new Map<string, SFCDescriptor>()
+const { parse } = compiler
+export const descriptorCache = new Map<string, SFCDescriptor>()
 
 export function setDescriptor(filename: string, entry: SFCDescriptor) {
-  cache.set(cleanQuery(filename), entry)
+  descriptorCache.set(cleanQuery(filename), entry)
 }
 
-export function getDescriptor(filename: string): SFCDescriptor {
+export function getDescriptor(
+  filename: string,
+  compilerOptions?: CompilerOptions
+): SFCDescriptor {
   filename = cleanQuery(filename)
-  if (cache.has(filename)) {
-    return cache.get(filename)!
+  if (descriptorCache.has(filename)) {
+    return descriptorCache.get(filename)!
   }
 
   // This function should only be called after the descriptor has been
@@ -23,8 +27,9 @@ export function getDescriptor(filename: string): SFCDescriptor {
   const { descriptor } = parse(source, {
     filename,
     sourceMap: true,
+    templateParseOptions: compilerOptions,
   })
-  cache.set(filename, descriptor)
+  descriptorCache.set(filename, descriptor)
   return descriptor
 }
 

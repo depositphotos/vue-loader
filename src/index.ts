@@ -1,11 +1,9 @@
-import webpack = require('webpack')
+import type { LoaderContext } from 'webpack'
 import * as path from 'path'
+import * as crypto from 'crypto'
 import * as qs from 'querystring'
-import * as loaderUtils from 'loader-utils'
 
-import hash = require('hash-sum')
-
-import { parse } from 'vue/compiler-sfc'
+import { compiler } from './compiler'
 import type {
   TemplateCompiler,
   CompilerOptions,
@@ -21,6 +19,12 @@ import { formatError } from './formatError'
 import VueLoaderPlugin from './plugin'
 import { canInlineTemplate } from './resolveScript'
 import { setDescriptor } from './descriptorCache'
+import {
+  getOptions,
+  stringifyRequest as _stringifyRequest,
+  genMatchResource,
+  testWebpack5,
+} from './util'
 
 export { VueLoaderPlugin }
 
@@ -30,7 +34,21 @@ export interface VueLoaderOptions {
   transformAssetUrls?: SFCTemplateCompileOptions['transformAssetUrls']
   compiler?: TemplateCompiler | string
   compilerOptions?: CompilerOptions
+  /**
+   * TODO remove in 3.4
+   * @deprecated
+   */
   reactivityTransform?: boolean
+
+  /**
+   * @experimental
+   */
+  propsDestructure?: boolean
+  /**
+   * @experimental
+   */
+  defineModel?: boolean
+
   customElement?: boolean | RegExp
 
   hotReload?: boolean
@@ -38,16 +56,22 @@ export interface VueLoaderOptions {
   exposeFullFilePath?: boolean
   appendExtension?: boolean
   enableTsInTemplate?: boolean
+  experimentalInlineMatchResource?: boolean
 
   isServerBuild?: boolean
 }
 
 let errorEmitted = false
 
-const exportHelperPath = JSON.stringify(require.resolve('./exportHelper'))
+const { parse } = compiler
+const exportHelperPath = require.resolve('./exportHelper')
+
+function hash(text: string): string {
+  return crypto.createHash('sha256').update(text).digest('hex').substring(0, 8)
+}
 
 export default function loader(
-  this: webpack.loader.LoaderContext,
+  this: LoaderContext<VueLoaderOptions>,
   source: string
 ) {
   const loaderContext = this
@@ -67,8 +91,7 @@ export default function loader(
     errorEmitted = true
   }
 
-  const stringifyRequest = (r: string) =>
-    loaderUtils.stringifyRequest(loaderContext, r)
+  const stringifyRequest = (r: string) => _stringifyRequest(loaderContext, r)
 
   const {
     mode,
@@ -76,22 +99,28 @@ export default function loader(
     sourceMap,
     rootContext,
     resourcePath,
-    resourceQuery = '',
+    resourceQuery: _resourceQuery = '',
+    _compiler,
   } = loaderContext
 
-  const rawQuery = resourceQuery.slice(1)
+  const isWebpack5 = testWebpack5(_compiler)
+  const rawQuery = _resourceQuery.slice(1)
   const incomingQuery = qs.parse(rawQuery)
-  const options = (loaderUtils.getOptions(loaderContext) ||
-    {}) as VueLoaderOptions
+  const resourceQuery = rawQuery ? `&${rawQuery}` : ''
+  const options = (getOptions(loaderContext) || {}) as VueLoaderOptions
+  const enableInlineMatchResource =
+    isWebpack5 && Boolean(options.experimentalInlineMatchResource)
 
   const isServer = options.isServerBuild ?? target === 'node'
   const isProduction =
     mode === 'production' || process.env.NODE_ENV === 'production'
 
   const filename = resourcePath.replace(/\?.*$/, '')
+
   const { descriptor, errors } = parse(source, {
     filename,
     sourceMap,
+    templateParseOptions: options.compilerOptions,
   })
 
   const asCustomElement =
@@ -154,10 +183,23 @@ export default function loader(
   if (script || scriptSetup) {
     const lang = script?.lang || scriptSetup?.lang
     isTS = !!(lang && /tsx?/.test(lang))
+    const externalQuery = Boolean(script && !scriptSetup && script.src)
+      ? `&external`
+      : ``
     const src = (script && !scriptSetup && script.src) || resourcePath
     const attrsQuery = attrsToQuery((scriptSetup || script)!.attrs, 'js')
-    const query = `?vue&type=script${attrsQuery}${resourceQuery}`
-    const scriptRequest = stringifyRequest(src + query)
+    const query = `?vue&type=script${attrsQuery}${resourceQuery}${externalQuery}`
+
+    let scriptRequest: string
+
+    if (enableInlineMatchResource) {
+      scriptRequest = stringifyRequest(
+        genMatchResource(this, src, query, lang || 'js')
+      )
+    } else {
+      scriptRequest = stringifyRequest(src + query)
+    }
+
     scriptImport =
       `import script from ${scriptRequest}\n` +
       // support named exports
@@ -171,13 +213,27 @@ export default function loader(
   const useInlineTemplate = canInlineTemplate(descriptor, isProduction)
   if (descriptor.template && !useInlineTemplate) {
     const src = descriptor.template.src || resourcePath
+    const externalQuery = Boolean(descriptor.template.src) ? `&external` : ``
     const idQuery = `&id=${id}`
     const scopedQuery = hasScoped ? `&scoped=true` : ``
     const attrsQuery = attrsToQuery(descriptor.template.attrs)
     const tsQuery =
       options.enableTsInTemplate !== false && isTS ? `&ts=true` : ``
-    const query = `?vue&type=template${idQuery}${scopedQuery}${tsQuery}${attrsQuery}${resourceQuery}`
-    templateRequest = stringifyRequest(src + query)
+    const query = `?vue&type=template${idQuery}${scopedQuery}${tsQuery}${attrsQuery}${resourceQuery}${externalQuery}`
+
+    if (enableInlineMatchResource) {
+      templateRequest = stringifyRequest(
+        genMatchResource(
+          this,
+          src,
+          query,
+          options.enableTsInTemplate !== false && isTS ? 'ts' : 'js'
+        )
+      )
+    } else {
+      templateRequest = stringifyRequest(src + query)
+    }
+
     templateImport = `import { ${renderFnName} } from ${templateRequest}`
     propsToAttach.push([renderFnName, renderFnName])
   }
@@ -193,16 +249,29 @@ export default function loader(
       .forEach((style, i) => {
         const src = style.src || resourcePath
         const attrsQuery = attrsToQuery(style.attrs, 'css')
+        const lang = String(style.attrs.lang || 'css')
         // make sure to only pass id when necessary so that we don't inject
         // duplicate tags when multiple components import the same css file
         const idQuery = !style.src || style.scoped ? `&id=${id}` : ``
         const inlineQuery = asCustomElement ? `&inline` : ``
-        const query = `?vue&type=style&index=${i}${idQuery}${inlineQuery}${attrsQuery}${resourceQuery}`
-        const styleRequest = stringifyRequest(src + query)
+        const externalQuery = Boolean(style.src) ? `&external` : ``
+        const query = `?vue&type=style&index=${i}${idQuery}${inlineQuery}${attrsQuery}${resourceQuery}${externalQuery}`
+
+        let styleRequest
+        if (enableInlineMatchResource) {
+          styleRequest = stringifyRequest(
+            genMatchResource(this, src, query, lang)
+          )
+        } else {
+          styleRequest = stringifyRequest(src + query)
+        }
+
         if (style.module) {
           if (asCustomElement) {
             loaderContext.emitError(
-              `<style module> is not supported in custom element mode.`
+              new Error(
+                `<style module> is not supported in custom element mode.`
+              )
             )
           }
           if (!hasCSSModules) {
@@ -281,9 +350,27 @@ export default function loader(
           const issuerQuery = block.attrs.src
             ? `&issuerPath=${qs.escape(resourcePath)}`
             : ''
-          const query = `?vue&type=custom&index=${i}${blockTypeQuery}${issuerQuery}${attrsQuery}${resourceQuery}`
+
+          const externalQuery = Boolean(block.attrs.src) ? `&external` : ``
+          const query = `?vue&type=custom&index=${i}${blockTypeQuery}${issuerQuery}${attrsQuery}${resourceQuery}${externalQuery}`
+
+          let customRequest
+
+          if (enableInlineMatchResource) {
+            customRequest = stringifyRequest(
+              genMatchResource(
+                this,
+                src as string,
+                query,
+                block.attrs.lang as string
+              )
+            )
+          } else {
+            customRequest = stringifyRequest(src + query)
+          }
+
           return (
-            `import block${i} from ${stringifyRequest(src + query)}\n` +
+            `import block${i} from ${customRequest}\n` +
             `if (typeof block${i} === 'function') block${i}(script)`
           )
         })
@@ -294,7 +381,9 @@ export default function loader(
   if (!propsToAttach.length) {
     code += `\n\nconst __exports__ = script;`
   } else {
-    code += `\n\nimport exportComponent from ${exportHelperPath}`
+    code += `\n\nimport exportComponent from ${stringifyRequest(
+      exportHelperPath
+    )}`
     code += `\nconst __exports__ = /*#__PURE__*/exportComponent(script, [${propsToAttach
       .map(([key, val]) => `['${key}',${val}]`)
       .join(',')}])`

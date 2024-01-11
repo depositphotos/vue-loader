@@ -1,14 +1,24 @@
 /* env jest */
 import * as path from 'path'
-import webpack = require('webpack')
+import * as crypto from 'crypto'
+import webpack from 'webpack'
 import merge from 'webpack-merge'
-import hash = require('hash-sum')
 // import MiniCssExtractPlugin from 'mini-css-extract-plugin'
 import { fs as mfs } from 'memfs'
-
 import { JSDOM, VirtualConsole } from 'jsdom'
+import { VueLoaderPlugin } from '..'
+import type { VueLoaderOptions } from '..'
 
-import { VueLoaderPlugin, VueLoaderOptions } from '../dist/index'
+function hash(text: string): string {
+  return crypto.createHash('sha256').update(text).digest('hex').substring(0, 8)
+}
+
+export const DEFAULT_VUE_USE = {
+  loader: 'vue-loader',
+  options: {
+    experimentalInlineMatchResource: Boolean(process.env.INLINE_MATCH_RESOURCE),
+  },
+}
 
 const baseConfig: webpack.Configuration = {
   mode: 'development',
@@ -17,6 +27,9 @@ const baseConfig: webpack.Configuration = {
     path: '/',
     filename: 'test.build.js',
     publicPath: '',
+  },
+  resolve: {
+    extensions: ['.js', '.ts'],
   },
   resolveLoader: {
     alias: {
@@ -27,11 +40,17 @@ const baseConfig: webpack.Configuration = {
     rules: [
       {
         test: /\.vue$/,
-        loader: 'vue-loader',
+        use: [DEFAULT_VUE_USE],
       },
       {
-        test: /\.css$/,
-        use: ['style-loader', 'css-loader'],
+        test: /\.ts$/,
+        loader: process.env.WEBPACK4
+          ? require.resolve('ts-loader')
+          : require.resolve('ts-loader-v9'),
+        options: {
+          transpileOnly: true,
+          appendTsSuffixTo: [/\.vue$/],
+        },
       },
     ],
   },
@@ -40,6 +59,7 @@ const baseConfig: webpack.Configuration = {
     new webpack.DefinePlugin({
       __VUE_OPTIONS_API__: true,
       __VUE_PROD_DEVTOOLS__: false,
+      __VUE_PROD_HYDRATION_MISMATCH_DETAILS__: false,
     }),
     // new MiniCssExtractPlugin({
     //   filename: '[name].css',
@@ -61,16 +81,41 @@ export function bundle(
 }> {
   let config: BundleOptions = merge({}, baseConfig, options)
 
-  if (config.vue && config.module) {
-    const vueOptions = options.vue
-    delete config.vue
-    const vueIndex = config.module.rules.findIndex(
-      (r) => r.test instanceof RegExp && r.test.test('.vue')
-    )
-    const vueRule = config.module.rules[vueIndex]
-    config.module.rules[vueIndex] = Object.assign({}, vueRule, {
-      options: vueOptions,
+  if (!options.experiments?.css) {
+    config.module?.rules?.push({
+      test: /\.css$/,
+      use: ['style-loader', 'css-loader'],
     })
+  }
+
+  if (config.vue && config.module) {
+    const vueOptions = {
+      // Test experimental inline match resource by default
+      experimentalInlineMatchResource: Boolean(
+        process.env.INLINE_MATCH_RESOURCE
+      ),
+      ...options.vue,
+    }
+
+    delete config.vue
+    const vueIndex = config.module.rules!.findIndex(
+      (r: any) => r.test instanceof RegExp && r.test.test('.vue')
+    )
+    const vueRule = config.module.rules![vueIndex]
+
+    // Detect `Rule.use` or `Rule.loader` and `Rule.options` combination
+    if (vueRule && typeof vueRule === 'object' && Array.isArray(vueRule.use)) {
+      // Vue usually locates at the first loader
+      if (typeof vueRule.use?.[0] === 'object') {
+        vueRule.use[0] = Object.assign({}, vueRule.use[0], {
+          options: vueOptions,
+        })
+      }
+    } else {
+      config.module.rules![vueIndex] = Object.assign({}, vueRule, {
+        options: vueOptions,
+      })
+    }
   }
 
   if (typeof config.entry === 'string' && /\.vue/.test(config.entry)) {
@@ -100,7 +145,7 @@ export function bundle(
 
   return new Promise((resolve, reject) => {
     webpackCompiler.run((err, stats) => {
-      const errors = stats.compilation.errors
+      const errors = stats?.compilation.errors
       if (!wontThrowError) {
         expect(err).toBeNull()
         if (errors && errors.length) {
@@ -116,7 +161,7 @@ export function bundle(
       } else {
         resolve({
           code: mfs.readFileSync('/test.build.js').toString(),
-          stats,
+          stats: stats!,
         })
       }
     })
@@ -130,7 +175,7 @@ export async function mockBundleAndRun(
   const { code, stats } = await bundle(options, wontThrowError)
 
   const dom = new JSDOM(
-    `<!DOCTYPE html><html><head></head><body><div id="#app"></div></body></html>`,
+    `<!DOCTYPE html><html><head></head><body></body></html>`,
     {
       runScripts: 'outside-only',
       virtualConsole: new VirtualConsole(),
