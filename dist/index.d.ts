@@ -1,4 +1,4 @@
-import webpack = require('webpack')
+import type { LoaderContext } from 'webpack'
 import type {
   TemplateCompiler,
   CompilerOptions,
@@ -12,16 +12,29 @@ export interface VueLoaderOptions {
   transformAssetUrls?: SFCTemplateCompileOptions['transformAssetUrls']
   compiler?: TemplateCompiler | string
   compilerOptions?: CompilerOptions
+  /**
+   * TODO remove in 3.4
+   * @deprecated
+   */
   reactivityTransform?: boolean
+  /**
+   * @experimental
+   */
+  propsDestructure?: boolean
+  /**
+   * @experimental
+   */
+  defineModel?: boolean
   customElement?: boolean | RegExp
   hotReload?: boolean
   exposeFilename?: boolean
   exposeFullFilePath?: boolean
   appendExtension?: boolean
   enableTsInTemplate?: boolean
+  experimentalInlineMatchResource?: boolean
   isServerBuild?: boolean
 }
 export default function loader(
-  this: webpack.loader.LoaderContext,
+  this: LoaderContext<VueLoaderOptions>,
   source: string
 ): string | void
