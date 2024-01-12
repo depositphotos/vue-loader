@@ -1,12 +1,49 @@
 'use strict'
+var __createBinding =
+  (this && this.__createBinding) ||
+  (Object.create
+    ? function (o, m, k, k2) {
+        if (k2 === undefined) k2 = k
+        Object.defineProperty(o, k2, {
+          enumerable: true,
+          get: function () {
+            return m[k]
+          },
+        })
+      }
+    : function (o, m, k, k2) {
+        if (k2 === undefined) k2 = k
+        o[k2] = m[k]
+      })
+var __setModuleDefault =
+  (this && this.__setModuleDefault) ||
+  (Object.create
+    ? function (o, v) {
+        Object.defineProperty(o, 'default', { enumerable: true, value: v })
+      }
+    : function (o, v) {
+        o['default'] = v
+      })
+var __importStar =
+  (this && this.__importStar) ||
+  function (mod) {
+    if (mod && mod.__esModule) return mod
+    var result = {}
+    if (mod != null)
+      for (var k in mod)
+        if (k !== 'default' && Object.prototype.hasOwnProperty.call(mod, k))
+          __createBinding(result, mod, k)
+    __setModuleDefault(result, mod)
+    return result
+  }
 Object.defineProperty(exports, '__esModule', { value: true })
-const qs = require('querystring')
-const loaderUtils = require('loader-utils')
+const qs = __importStar(require('querystring'))
 const formatError_1 = require('./formatError')
 const descriptorCache_1 = require('./descriptorCache')
 const resolveScript_1 = require('./resolveScript')
 const util_1 = require('./util')
-const compiler_sfc_1 = require('vue/compiler-sfc')
+const compiler_1 = require('./compiler')
+const { compileTemplate } = compiler_1.compiler
 // Loader that compiles raw template into JavaScript functions.
 // This is injected by the global pitcher (../pitch) for template
 // selection requests initiated from vue files.
@@ -17,7 +54,7 @@ const TemplateLoader = function (source, inMap) {
   // although this is not the main vue-loader, we can get access to the same
   // vue-loader options because we've set an ident in the plugin and used that
   // ident to create the request for this loader in the pitcher.
-  const options = loaderUtils.getOptions(loaderContext) || {}
+  const options = (0, util_1.getOptions)(loaderContext) || {}
   const isServer =
     (_a = options.isServerBuild) !== null && _a !== void 0
       ? _a
@@ -27,7 +64,8 @@ const TemplateLoader = function (source, inMap) {
   const query = qs.parse(loaderContext.resourceQuery.slice(1))
   const scopeId = query.id
   const descriptor = (0, descriptorCache_1.getDescriptor)(
-    loaderContext.resourcePath
+    loaderContext.resourcePath,
+    options.compilerOptions
   )
   const script = (0, resolveScript_1.resolveScript)(
     descriptor,
@@ -41,8 +79,12 @@ const TemplateLoader = function (source, inMap) {
   } else {
     templateCompiler = options.compiler
   }
-  const compiled = (0, compiler_sfc_1.compileTemplate)({
+  const compiled = compileTemplate({
     source,
+    ast:
+      descriptor.template && !descriptor.template.lang
+        ? descriptor.template.ast
+        : undefined,
     filename: loaderContext.resourcePath,
     inMap,
     id: scopeId,
@@ -64,14 +106,14 @@ const TemplateLoader = function (source, inMap) {
   // tips
   if (compiled.tips.length) {
     compiled.tips.forEach((tip) => {
-      loaderContext.emitWarning(tip)
+      loaderContext.emitWarning(new Error(tip))
     })
   }
   // errors
   if (compiled.errors && compiled.errors.length) {
     compiled.errors.forEach((err) => {
       if (typeof err === 'string') {
-        loaderContext.emitError(err)
+        loaderContext.emitError(new Error(err))
       } else {
         ;(0, formatError_1.formatError)(
           err,
